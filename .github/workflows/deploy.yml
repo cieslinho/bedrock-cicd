@@ -12,14 +12,6 @@ on:
         required: false
         type: string
         default: 'wp'
-      php_version:
-        required: false
-        type: string
-        default: '8.3'
-      node_version:
-        required: false
-        type: string
-        default: '20'
     secrets:
       SSH_CONFIG:
         description: 'SSH config block (Host, HostName, User, Port, IdentityFile)'
@@ -36,16 +28,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # .ddev/config.yaml is the single source of truth for PHP/Node
+      # versions - read from it instead of duplicating the values here,
+      # so CI can never drift from the local dev container.
+      - name: Read PHP/Node versions from DDEV config
+        id: versions
+        run: |
+          echo "php=$(grep '^php_version:' .ddev/config.yaml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+          echo "node=$(grep '^nodejs_version:' .ddev/config.yaml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: ${{ inputs.php_version }}
+          php-version: ${{ steps.versions.outputs.php }}
           tools: composer
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ inputs.node_version }}
+          node-version: ${{ steps.versions.outputs.node }}
 
       # Requires a `cicd-build` target in the caller repo's Makefile
       # (composer install + asset build for every buildable directory).

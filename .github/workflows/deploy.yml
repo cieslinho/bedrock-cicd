@@ -1,0 +1,113 @@
+name: Deploy Bedrock
+
+on:
+  workflow_call:
+    inputs:
+      stage:
+        description: 'Deployer stage/host defined in deploy.php (e.g. "staging", "live")'
+        required: true
+        type: string
+      bedrock_root:
+        description: 'Path to the Bedrock root in the repo (contains composer.json, deploy.php)'
+        required: false
+        type: string
+        default: 'wp'
+      php_version:
+        required: false
+        type: string
+        default: '8.3'
+      node_version:
+        required: false
+        type: string
+        default: '20'
+    secrets:
+      SSH_CONFIG:
+        description: 'SSH config block (Host, HostName, User, Port, IdentityFile)'
+        required: true
+      SSH_PRIVATE_KEY:
+        required: true
+
+jobs:
+  build:
+    name: Build artifact (${{ inputs.stage }})
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ inputs.php_version }}
+          tools: composer
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      # Requires a `cicd-build` target in the caller repo's Makefile
+      # (composer install + asset build for every buildable directory).
+      - name: Composer install and asset build
+        run: make cicd-build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bedrock-build
+          path: ${{ inputs.bedrock_root }}
+          retention-days: 1
+
+  deploy:
+    name: Deploy (${{ inputs.stage }})
+    needs: build
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.stage }}
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bedrock-build
+          path: ${{ inputs.bedrock_root }}
+
+      # Deployer is a CI tool, not a project dependency - it must not
+      # live in the Bedrock composer.json, since `composer install
+      # --no-dev` (the build step above) strips require-dev and would
+      # remove it from the artifact.
+      - name: Install Deployer
+        run: |
+          curl -LO https://deployer.org/deployer.phar
+          chmod +x deployer.phar
+
+      # Checked out separately from the Bedrock artifact for the same
+      # reason - the recipe is not a composer dependency of the project.
+      - name: Checkout bedrock-cicd recipe
+        uses: actions/checkout@v4
+        with:
+          repository: cieslinho/bedrock-cicd
+          path: .bedrock-cicd
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "${{ secrets.SSH_CONFIG }}" >> ~/.ssh/config
+          echo "  IdentityFile ~/.ssh/deploy_key" >> ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          HOSTNAME=$(awk '/HostName/{print $2}' ~/.ssh/config | head -1)
+          PORT=$(awk '/Port/{print $2}' ~/.ssh/config | head -1)
+          ssh-keyscan -p ${PORT:-22} "$HOSTNAME" >> ~/.ssh/known_hosts
+
+      - name: Deployer release
+        working-directory: ${{ inputs.bedrock_root }}
+        env:
+          CI_BUILD_PATH: ${{ github.workspace }}/${{ inputs.bedrock_root }}
+          BEDROCK_CICD_RECIPE: ${{ github.workspace }}/.bedrock-cicd/recipe/bedrock.php
+        run: php ${{ github.workspace }}/deployer.phar deploy ${{ inputs.stage }} -f deploy.php --no-interaction -vv
+
+      - name: Cleanup runner
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

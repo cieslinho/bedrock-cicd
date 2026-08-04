@@ -136,6 +136,16 @@ jobs:
             ln -nfs '$DEPLOY_PATH/shared/uploads' '$DEPLOY_PATH/$RELEASE/web/app/uploads'
           "
 
+          # Best-effort: a DB backup failure (e.g. not configured yet on
+          # a fresh environment) must not block the code deploy itself.
+          echo "Backing up database before swap..."
+          ssh "$ALIAS" "
+            mkdir -p '$DEPLOY_PATH/backups/db'
+            if [ -d '$DEPLOY_PATH/app/web/wp' ]; then
+              cd '$DEPLOY_PATH/app' && wp db export - --path=web/wp | gzip > '$DEPLOY_PATH/backups/db/pre-deploy-${TS}.sql.gz'
+            fi
+          " || echo "::warning::Database backup failed or skipped, continuing with deploy"
+
           echo "Swapping into place..."
           ssh "$ALIAS" "
             set -e

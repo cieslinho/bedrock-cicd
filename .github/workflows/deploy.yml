@@ -142,8 +142,9 @@ jobs:
           ssh "$ALIAS" "
             mkdir -p '$DEPLOY_PATH/backups/db'
             if [ -d '$DEPLOY_PATH/app/web/wp' ]; then
-              cd '$DEPLOY_PATH/app' && wp db export - --path=web/wp | gzip > '$DEPLOY_PATH/backups/db/pre-deploy-${TS}.sql.gz'
+              cd '$DEPLOY_PATH/app' && wp db export - --path=web/wp | gzip > '$DEPLOY_PATH/backups/db/db_${TS}.sql.gz'
             fi
+            cd '$DEPLOY_PATH/backups/db' && ls -1t db_*.sql.gz 2>/dev/null | tail -n +\$(( ${{ inputs.keep_backups }} + 1 )) | xargs -r rm -f
           " || echo "::warning::Database backup failed or skipped, continuing with deploy"
 
           echo "Swapping into place..."

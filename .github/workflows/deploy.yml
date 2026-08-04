@@ -20,10 +20,12 @@ on:
         required: true
 
 jobs:
-  deploy:
-    name: Deploy (${{ inputs.stage }})
+  get-versions:
+    name: Read PHP/Node versions
     runs-on: ubuntu-latest
-    environment: ${{ inputs.stage }}
+    outputs:
+      php: ${{ steps.versions.outputs.php }}
+      node: ${{ steps.versions.outputs.node }}
 
     steps:
       - name: Checkout
@@ -32,22 +34,32 @@ jobs:
       # .ddev/config.yaml is the single source of truth for PHP/Node
       # versions - read from it instead of duplicating the values here,
       # so CI can never drift from the local dev container.
-      - name: Read PHP/Node versions from DDEV config
+      - name: Read from .ddev/config.yaml
         id: versions
         run: |
           echo "php=$(grep '^php_version:' .ddev/config.yaml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
           echo "node=$(grep '^nodejs_version:' .ddev/config.yaml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
 
+  deploy:
+    name: Build and deploy (${{ inputs.stage }})
+    needs: get-versions
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.stage }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: ${{ steps.versions.outputs.php }}
+          php-version: ${{ needs.get-versions.outputs.php }}
           tools: composer
 
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
-          node-version: ${{ steps.versions.outputs.node }}
+          node-version: ${{ needs.get-versions.outputs.node }}
           cache: npm
           cache-dependency-path: ${{ inputs.bedrock_root }}/**/package-lock.json
 

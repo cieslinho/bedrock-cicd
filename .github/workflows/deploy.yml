@@ -20,9 +20,10 @@ on:
         required: true
 
 jobs:
-  build:
-    name: Build artifact (${{ inputs.stage }})
+  deploy:
+    name: Deploy (${{ inputs.stage }})
     runs-on: ubuntu-latest
+    environment: ${{ inputs.stage }}
 
     steps:
       - name: Checkout
@@ -65,37 +66,17 @@ jobs:
       - name: Composer install and asset build
         run: make cicd-build
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: bedrock-build
-          path: ${{ inputs.bedrock_root }}
-          retention-days: 1
-
-  deploy:
-    name: Deploy (${{ inputs.stage }})
-    needs: build
-    runs-on: ubuntu-latest
-    environment: ${{ inputs.stage }}
-
-    steps:
-      - name: Download artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: bedrock-build
-          path: ${{ inputs.bedrock_root }}
-
       # Deployer is a CI tool, not a project dependency - it must not
       # live in the Bedrock composer.json, since `composer install
-      # --no-dev` (the build step above) strips require-dev and would
-      # remove it from the artifact. deployer.org/deployer.phar serves a
-      # stale v6 build - GitHub Releases has the current one.
+      # --no-dev` above strips require-dev and would remove it from the
+      # build. deployer.org/deployer.phar serves a stale v6 build -
+      # GitHub Releases has the current one.
       - name: Install Deployer
         run: |
           curl -sL https://github.com/deployphp/deployer/releases/latest/download/deployer.phar -o deployer.phar
           chmod +x deployer.phar
 
-      # Checked out separately from the Bedrock artifact for the same
+      # Checked out separately from the Bedrock build for the same
       # reason - the recipe is not a composer dependency of the project.
       - name: Checkout bedrock-cicd recipe
         uses: actions/checkout@v7

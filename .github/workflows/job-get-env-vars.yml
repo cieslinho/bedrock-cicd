@@ -1,0 +1,69 @@
+name: job-get-env-vars
+
+on:
+  workflow_call:
+    inputs:
+      stage:
+        required: true
+        type: string
+    outputs:
+      php:
+        value: ${{ jobs.get-env-vars.outputs.php }}
+      node:
+        value: ${{ jobs.get-env-vars.outputs.node }}
+      server_deployment_dir_path:
+        value: ${{ jobs.get-env-vars.outputs.server_deployment_dir_path }}
+      server_public_dir_path:
+        value: ${{ jobs.get-env-vars.outputs.server_public_dir_path }}
+      server_uploads_dir_path:
+        value: ${{ jobs.get-env-vars.outputs.server_uploads_dir_path }}
+      server_env_path:
+        value: ${{ jobs.get-env-vars.outputs.server_env_path }}
+      local_public_dir_path:
+        value: ${{ jobs.get-env-vars.outputs.local_public_dir_path }}
+      local_uploads_dir_path:
+        value: ${{ jobs.get-env-vars.outputs.local_uploads_dir_path }}
+      server_post_deployment_commands:
+        value: ${{ jobs.get-env-vars.outputs.server_post_deployment_commands }}
+
+jobs:
+  get-env-vars:
+    name: get-env-vars
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.stage }}
+    outputs:
+      php: ${{ steps.ddev.outputs.php }}
+      node: ${{ steps.ddev.outputs.node }}
+      server_deployment_dir_path: ${{ steps.vars.outputs.server_deployment_dir_path }}
+      server_public_dir_path: ${{ steps.vars.outputs.server_public_dir_path }}
+      server_uploads_dir_path: ${{ steps.vars.outputs.server_uploads_dir_path }}
+      server_env_path: ${{ steps.vars.outputs.server_env_path }}
+      local_public_dir_path: ${{ steps.vars.outputs.local_public_dir_path }}
+      local_uploads_dir_path: ${{ steps.vars.outputs.local_uploads_dir_path }}
+      server_post_deployment_commands: ${{ steps.vars.outputs.server_post_deployment_commands }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # .ddev/config.yaml is the single source of truth for PHP/Node
+      # versions - read from it instead of duplicating the values here,
+      # so CI can never drift from the local dev container.
+      - name: Read PHP/Node versions from .ddev/config.yaml
+        id: ddev
+        run: |
+          echo "php=$(grep '^php_version:' .ddev/config.yaml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+          echo "node=$(grep '^nodejs_version:' .ddev/config.yaml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Read deployment paths from GitHub Environment vars
+        id: vars
+        run: |
+          echo "server_deployment_dir_path=${{ vars.BEDROCK_DEPLOYMENT_SERVER_DEPLOYMENT_DIR_PATH }}" >> "$GITHUB_OUTPUT"
+          echo "server_public_dir_path=${{ vars.BEDROCK_DEPLOYMENT_SERVER_PUBLIC_DIR_PATH }}" >> "$GITHUB_OUTPUT"
+          echo "server_uploads_dir_path=${{ vars.BEDROCK_DEPLOYMENT_SERVER_UPLOADS_DIR_PATH }}" >> "$GITHUB_OUTPUT"
+          echo "server_env_path=${{ vars.BEDROCK_DEPLOYMENT_SERVER_ENV_PATH }}" >> "$GITHUB_OUTPUT"
+          echo "local_public_dir_path=${{ vars.BEDROCK_DEPLOYMENT_LOCAL_PUBLIC_DIR_PATH }}" >> "$GITHUB_OUTPUT"
+          echo "local_uploads_dir_path=${{ vars.BEDROCK_DEPLOYMENT_LOCAL_UPLOADS_DIR_PATH }}" >> "$GITHUB_OUTPUT"
+          echo "server_post_deployment_commands<<COMMANDS_EOF" >> "$GITHUB_OUTPUT"
+          echo "${{ vars.BEDROCK_DEPLOYMENT_SERVER_POST_DEPLOYMENT_COMMANDS }}" >> "$GITHUB_OUTPUT"
+          echo "COMMANDS_EOF" >> "$GITHUB_OUTPUT"

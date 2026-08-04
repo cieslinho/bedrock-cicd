@@ -1,0 +1,194 @@
+name: job-deployment-wordpress
+
+on:
+  workflow_call:
+    inputs:
+      stage:
+        required: true
+        type: string
+      bedrock_root:
+        required: false
+        type: string
+        default: 'wp'
+      keep_backups:
+        required: false
+        type: number
+        default: 3
+      php:
+        required: true
+        type: string
+      node:
+        required: true
+        type: string
+      server_deployment_dir_path:
+        required: true
+        type: string
+      server_public_dir_path:
+        required: true
+        type: string
+      server_uploads_dir_path:
+        required: true
+        type: string
+      server_env_path:
+        required: true
+        type: string
+      local_public_dir_path:
+        required: true
+        type: string
+      local_uploads_dir_path:
+        required: true
+        type: string
+      server_post_deployment_commands:
+        required: false
+        type: string
+        default: ''
+    secrets:
+      SSH_CONFIG:
+        required: true
+      SSH_PRIVATE_KEY:
+        required: true
+
+jobs:
+  deployment-wordpress:
+    name: deployment-wordpress
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.stage }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ inputs.php }}
+          tools: composer
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.bedrock_root }}/**/package-lock.json
+
+      - name: Cache Composer downloads
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/composer
+          key: composer-${{ runner.os }}-${{ hashFiles(format('{0}/**/composer.lock', inputs.bedrock_root)) }}
+          restore-keys: composer-${{ runner.os }}-
+
+      # Requires a `cicd-build` target in the caller repo's Makefile
+      # (composer install + asset build for every buildable directory).
+      - name: Composer install and asset build
+        run: make cicd-build
+
+      - name: Setup SSH
+        id: ssh
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "${{ secrets.SSH_CONFIG }}" >> ~/.ssh/config
+          echo "  IdentityFile ~/.ssh/deploy_key" >> ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          ALIAS=$(awk '/^Host /{print $2; exit}' ~/.ssh/config)
+          HOSTNAME=$(awk '/HostName/{print $2}' ~/.ssh/config | head -1)
+          PORT=$(awk '/Port/{print $2}' ~/.ssh/config | head -1)
+          ssh-keyscan -p ${PORT:-22} "$HOSTNAME" >> ~/.ssh/known_hosts
+          echo "alias=$ALIAS" >> "$GITHUB_OUTPUT"
+
+      # Mirrors ParadiseMediaOrg/DevOps's job-deployment-wordpress.yml:
+      #
+      # deployments/
+      #   app/               <- live release, swapped atomically via mv
+      #   shared/uploads/     <- persists across releases
+      #   shared/.env         <- persists across releases
+      #   backups/             <- compressed previous releases + DB dumps
+      #
+      # server_public_dir_path is a PERMANENT real directory, never
+      # itself replaced. After each swap, its contents are refreshed
+      # one entry at a time with symlinks into the new app/web/ -
+      # anything not part of the build (e.g. a WordPress-generated
+      # .htaccess) is left untouched instead of being wiped, unlike a
+      # whole-directory symlink.
+      - name: Deploy
+        working-directory: ${{ inputs.bedrock_root }}
+        env:
+          ALIAS: ${{ steps.ssh.outputs.alias }}
+          DEPLOY_PATH: ${{ inputs.server_deployment_dir_path }}
+          PUBLIC_PATH: ${{ inputs.server_public_dir_path }}
+          UPLOADS_PATH: ${{ inputs.server_uploads_dir_path }}
+          ENV_PATH: ${{ inputs.server_env_path }}
+          LOCAL_PUBLIC: ${{ inputs.local_public_dir_path }}
+          LOCAL_UPLOADS: ${{ inputs.local_uploads_dir_path }}
+          POST_DEPLOYMENT_COMMANDS: ${{ inputs.server_post_deployment_commands }}
+        run: |
+          set -euo pipefail
+          TS="$(ssh "$ALIAS" 'date +%Y-%m-%d-%H%M%S')"
+          RELEASE_DIR="$(dirname "$DEPLOY_PATH")/deploying_${TS}"
+
+          echo "Preparing release directory..."
+          ssh "$ALIAS" "mkdir -p '$RELEASE_DIR' '$UPLOADS_PATH' '$PUBLIC_PATH' '$(dirname "$DEPLOY_PATH")/backups/app' '$(dirname "$DEPLOY_PATH")/backups/db'"
+          ssh "$ALIAS" "[ -f '$ENV_PATH' ] || touch '$ENV_PATH'"
+
+          echo "Uploading build..."
+          rsync -az \
+            --exclude=".$(basename "$ENV_PATH")" \
+            --exclude="$LOCAL_UPLOADS" \
+            -e "ssh -o StrictHostKeyChecking=no" \
+            ./ "$ALIAS:$RELEASE_DIR/"
+
+          echo "Linking persistent files..."
+          ssh "$ALIAS" "
+            ln -nfs '$ENV_PATH' '$RELEASE_DIR/.env'
+            rm -rf '$RELEASE_DIR/$LOCAL_UPLOADS'
+            ln -nfs '$UPLOADS_PATH' '$RELEASE_DIR/$LOCAL_UPLOADS'
+          "
+
+          # Best-effort: a DB backup failure (e.g. not configured yet on
+          # a fresh environment) must not block the code deploy itself.
+          echo "Backing up database before swap..."
+          ssh "$ALIAS" "
+            if [ -d '$DEPLOY_PATH/$LOCAL_PUBLIC/wp' ]; then
+              cd '$DEPLOY_PATH' && wp db export - --path='$LOCAL_PUBLIC/wp' | gzip > '$(dirname "$DEPLOY_PATH")/backups/db/db_${TS}.sql.gz'
+            fi
+            cd '$(dirname "$DEPLOY_PATH")/backups/db' && ls -1t db_*.sql.gz 2>/dev/null | tail -n +\$(( ${{ inputs.keep_backups }} + 1 )) | xargs -r rm -f
+          " || echo "::warning::Database backup failed or skipped, continuing with deploy"
+
+          echo "Swapping into place..."
+          ssh "$ALIAS" "
+            set -e
+            if [ -d '$DEPLOY_PATH' ]; then
+              mv '$DEPLOY_PATH' '$(dirname "$DEPLOY_PATH")/backups/app/app_${TS}'
+            fi
+            mv '$RELEASE_DIR' '$DEPLOY_PATH'
+          "
+
+          echo "Refreshing public directory symlinks..."
+          ssh "$ALIAS" "
+            for ENTRY in '$DEPLOY_PATH/$LOCAL_PUBLIC'/* '$DEPLOY_PATH/$LOCAL_PUBLIC'/.[!.]*; do
+              [ -e \"\$ENTRY\" ] || continue
+              NAME=\$(basename \"\$ENTRY\")
+              rm -rf \"$PUBLIC_PATH/\$NAME\"
+              ln -nfs \"\$ENTRY\" \"$PUBLIC_PATH/\$NAME\"
+            done
+          "
+
+          echo "Compressing backup and rotating old ones..."
+          ssh "$ALIAS" "
+            cd '$(dirname "$DEPLOY_PATH")/backups/app'
+            if [ -d 'app_${TS}' ]; then
+              tar -czf 'app_${TS}.tar.gz' 'app_${TS}' && rm -rf 'app_${TS}'
+            fi
+            ls -1t app_*.tar.gz 2>/dev/null | tail -n +\$(( ${{ inputs.keep_backups }} + 1 )) | xargs -r rm -f
+          "
+
+          if [ -n "$POST_DEPLOYMENT_COMMANDS" ]; then
+            echo "Running post-deployment commands..."
+            ssh "$ALIAS" "cd '$DEPLOY_PATH' && $POST_DEPLOYMENT_COMMANDS"
+          fi
+
+      - name: Cleanup runner
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

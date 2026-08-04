@@ -14,7 +14,10 @@ deployments/
     .env
     uploads/          -> web/app/uploads
   backups/
-    app_<timestamp>.tar.gz
+    app/
+      app_<timestamp>.tar.gz
+    db/
+      pre-deploy-<timestamp>.sql.gz
 ```
 
 Set up once, manually, outside this workflow:

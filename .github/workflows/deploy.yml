@@ -149,15 +149,16 @@ jobs:
           echo "Swapping into place..."
           ssh "$ALIAS" "
             set -e
+            mkdir -p '$DEPLOY_PATH/backups/app'
             if [ -d '$DEPLOY_PATH/app' ]; then
-              mv '$DEPLOY_PATH/app' '$DEPLOY_PATH/backups/app_${TS}'
+              mv '$DEPLOY_PATH/app' '$DEPLOY_PATH/backups/app/app_${TS}'
             fi
             mv '$DEPLOY_PATH/$RELEASE' '$DEPLOY_PATH/app'
           "
 
           echo "Compressing backup and rotating old ones..."
           ssh "$ALIAS" "
-            cd '$DEPLOY_PATH/backups'
+            cd '$DEPLOY_PATH/backups/app'
             if [ -d 'app_${TS}' ]; then
               tar -czf 'app_${TS}.tar.gz' 'app_${TS}' && rm -rf 'app_${TS}'
             fi

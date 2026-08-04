@@ -12,10 +12,6 @@ on:
         required: false
         type: string
         default: 'wp'
-      deploy_path:
-        description: 'Absolute server path to the deployments/ root, e.g. /home/user/domains/example.com/deployments'
-        required: true
-        type: string
       keep_backups:
         description: 'Number of compressed previous releases to keep in deployments/backups'
         required: false
@@ -49,9 +45,36 @@ jobs:
           echo "php=$(grep '^php_version:' .ddev/config.yaml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
           echo "node=$(grep '^nodejs_version:' .ddev/config.yaml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
 
+  get-vars:
+    name: Read deployment config
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.stage }}
+    outputs:
+      server_deployment_dir_path: ${{ steps.vars.outputs.server_deployment_dir_path }}
+      server_public_dir_path: ${{ steps.vars.outputs.server_public_dir_path }}
+      server_uploads_dir_path: ${{ steps.vars.outputs.server_uploads_dir_path }}
+      server_env_path: ${{ steps.vars.outputs.server_env_path }}
+      local_public_dir_path: ${{ steps.vars.outputs.local_public_dir_path }}
+      local_uploads_dir_path: ${{ steps.vars.outputs.local_uploads_dir_path }}
+      server_post_deployment_commands: ${{ steps.vars.outputs.server_post_deployment_commands }}
+
+    steps:
+      - name: Read from GitHub Environment vars
+        id: vars
+        run: |
+          echo "server_deployment_dir_path=${{ vars.BEDROCK_DEPLOYMENT_SERVER_DEPLOYMENT_DIR_PATH }}" >> "$GITHUB_OUTPUT"
+          echo "server_public_dir_path=${{ vars.BEDROCK_DEPLOYMENT_SERVER_PUBLIC_DIR_PATH }}" >> "$GITHUB_OUTPUT"
+          echo "server_uploads_dir_path=${{ vars.BEDROCK_DEPLOYMENT_SERVER_UPLOADS_DIR_PATH }}" >> "$GITHUB_OUTPUT"
+          echo "server_env_path=${{ vars.BEDROCK_DEPLOYMENT_SERVER_ENV_PATH }}" >> "$GITHUB_OUTPUT"
+          echo "local_public_dir_path=${{ vars.BEDROCK_DEPLOYMENT_LOCAL_PUBLIC_DIR_PATH }}" >> "$GITHUB_OUTPUT"
+          echo "local_uploads_dir_path=${{ vars.BEDROCK_DEPLOYMENT_LOCAL_UPLOADS_DIR_PATH }}" >> "$GITHUB_OUTPUT"
+          echo "server_post_deployment_commands<<COMMANDS_EOF" >> "$GITHUB_OUTPUT"
+          echo "${{ vars.BEDROCK_DEPLOYMENT_SERVER_POST_DEPLOYMENT_COMMANDS }}" >> "$GITHUB_OUTPUT"
+          echo "COMMANDS_EOF" >> "$GITHUB_OUTPUT"
+
   deploy:
     name: Build and deploy (${{ inputs.stage }})
-    needs: get-versions
+    needs: [get-versions, get-vars]
     runs-on: ubuntu-latest
     environment: ${{ inputs.stage }}
 
@@ -99,72 +122,96 @@ jobs:
           ssh-keyscan -p ${PORT:-22} "$HOSTNAME" >> ~/.ssh/known_hosts
           echo "alias=$ALIAS" >> "$GITHUB_OUTPUT"
 
-      # Single live directory (deployments/app), swapped via atomic mv
-      # instead of Deployer's releases/N + current-symlink model - the
-      # server's public_html is a symlink to deployments/app/web, set up
-      # once outside this workflow, so it never needs touching here.
+      # Mirrors ParadiseMediaOrg/DevOps's job-deployment-wordpress.yml:
       #
       # deployments/
-      #   app/               <- live, public_html points here
-      #   shared/            <- .env, uploads - survive every deploy
-      #   backups/           <- compressed previous releases (tar.gz)
+      #   app/               <- live release, swapped atomically via mv
+      #   shared/uploads/     <- persists across releases
+      #   shared/.env         <- persists across releases
+      #   backups/             <- compressed previous releases + DB dumps
+      #
+      # public_html (SERVER_PUBLIC_DIR_PATH) is a PERMANENT real
+      # directory, never itself replaced. After each swap, its contents
+      # are refreshed one entry at a time with symlinks into the new
+      # app/web/ - anything not part of the build (e.g. a WordPress-
+      # generated .htaccess) is left untouched instead of being wiped,
+      # unlike a whole-directory symlink.
       - name: Deploy
         working-directory: ${{ inputs.bedrock_root }}
         env:
           ALIAS: ${{ steps.ssh.outputs.alias }}
+          DEPLOY_PATH: ${{ needs.get-vars.outputs.server_deployment_dir_path }}
+          PUBLIC_PATH: ${{ needs.get-vars.outputs.server_public_dir_path }}
+          UPLOADS_PATH: ${{ needs.get-vars.outputs.server_uploads_dir_path }}
+          ENV_PATH: ${{ needs.get-vars.outputs.server_env_path }}
+          LOCAL_PUBLIC: ${{ needs.get-vars.outputs.local_public_dir_path }}
+          LOCAL_UPLOADS: ${{ needs.get-vars.outputs.local_uploads_dir_path }}
+          POST_DEPLOYMENT_COMMANDS: ${{ needs.get-vars.outputs.server_post_deployment_commands }}
         run: |
           set -euo pipefail
-          DEPLOY_PATH="${{ inputs.deploy_path }}"
           TS="$(ssh "$ALIAS" 'date +%Y-%m-%d-%H%M%S')"
-          RELEASE="deploying_${TS}"
+          RELEASE_DIR="$(dirname "$DEPLOY_PATH")/deploying_${TS}"
 
           echo "Preparing release directory..."
-          ssh "$ALIAS" "mkdir -p '$DEPLOY_PATH/$RELEASE' '$DEPLOY_PATH/shared/uploads' '$DEPLOY_PATH/backups'"
-          ssh "$ALIAS" "[ -f '$DEPLOY_PATH/shared/.env' ] || touch '$DEPLOY_PATH/shared/.env'"
+          ssh "$ALIAS" "mkdir -p '$RELEASE_DIR' '$UPLOADS_PATH' '$PUBLIC_PATH' '$(dirname "$DEPLOY_PATH")/backups/app' '$(dirname "$DEPLOY_PATH")/backups/db'"
+          ssh "$ALIAS" "[ -f '$ENV_PATH' ] || touch '$ENV_PATH'"
 
           echo "Uploading build..."
           rsync -az \
-            --exclude='.env' \
-            --exclude='web/app/uploads' \
+            --exclude=".$(basename "$ENV_PATH")" \
+            --exclude="$LOCAL_UPLOADS" \
             -e "ssh -o StrictHostKeyChecking=no" \
-            ./ "$ALIAS:$DEPLOY_PATH/$RELEASE/"
+            ./ "$ALIAS:$RELEASE_DIR/"
 
-          echo "Linking shared files..."
+          echo "Linking persistent files..."
           ssh "$ALIAS" "
-            ln -nfs '$DEPLOY_PATH/shared/.env' '$DEPLOY_PATH/$RELEASE/.env'
-            rm -rf '$DEPLOY_PATH/$RELEASE/web/app/uploads'
-            ln -nfs '$DEPLOY_PATH/shared/uploads' '$DEPLOY_PATH/$RELEASE/web/app/uploads'
+            ln -nfs '$ENV_PATH' '$RELEASE_DIR/.env'
+            rm -rf '$RELEASE_DIR/$LOCAL_UPLOADS'
+            ln -nfs '$UPLOADS_PATH' '$RELEASE_DIR/$LOCAL_UPLOADS'
           "
 
           # Best-effort: a DB backup failure (e.g. not configured yet on
           # a fresh environment) must not block the code deploy itself.
           echo "Backing up database before swap..."
           ssh "$ALIAS" "
-            mkdir -p '$DEPLOY_PATH/backups/db'
-            if [ -d '$DEPLOY_PATH/app/web/wp' ]; then
-              cd '$DEPLOY_PATH/app' && wp db export - --path=web/wp | gzip > '$DEPLOY_PATH/backups/db/db_${TS}.sql.gz'
+            if [ -d '$DEPLOY_PATH/$LOCAL_PUBLIC/wp' ]; then
+              cd '$DEPLOY_PATH' && wp db export - --path='$LOCAL_PUBLIC/wp' | gzip > '$(dirname "$DEPLOY_PATH")/backups/db/db_${TS}.sql.gz'
             fi
-            cd '$DEPLOY_PATH/backups/db' && ls -1t db_*.sql.gz 2>/dev/null | tail -n +\$(( ${{ inputs.keep_backups }} + 1 )) | xargs -r rm -f
+            cd '$(dirname "$DEPLOY_PATH")/backups/db' && ls -1t db_*.sql.gz 2>/dev/null | tail -n +\$(( ${{ inputs.keep_backups }} + 1 )) | xargs -r rm -f
           " || echo "::warning::Database backup failed or skipped, continuing with deploy"
 
           echo "Swapping into place..."
           ssh "$ALIAS" "
             set -e
-            mkdir -p '$DEPLOY_PATH/backups/app'
-            if [ -d '$DEPLOY_PATH/app' ]; then
-              mv '$DEPLOY_PATH/app' '$DEPLOY_PATH/backups/app/app_${TS}'
+            if [ -d '$DEPLOY_PATH' ]; then
+              mv '$DEPLOY_PATH' '$(dirname "$DEPLOY_PATH")/backups/app/app_${TS}'
             fi
-            mv '$DEPLOY_PATH/$RELEASE' '$DEPLOY_PATH/app'
+            mv '$RELEASE_DIR' '$DEPLOY_PATH'
+          "
+
+          echo "Refreshing public directory symlinks..."
+          ssh "$ALIAS" "
+            for ENTRY in '$DEPLOY_PATH/$LOCAL_PUBLIC'/* '$DEPLOY_PATH/$LOCAL_PUBLIC'/.[!.]*; do
+              [ -e \"\$ENTRY\" ] || continue
+              NAME=\$(basename \"\$ENTRY\")
+              rm -rf \"$PUBLIC_PATH/\$NAME\"
+              ln -nfs \"\$ENTRY\" \"$PUBLIC_PATH/\$NAME\"
+            done
           "
 
           echo "Compressing backup and rotating old ones..."
           ssh "$ALIAS" "
-            cd '$DEPLOY_PATH/backups/app'
+            cd '$(dirname "$DEPLOY_PATH")/backups/app'
             if [ -d 'app_${TS}' ]; then
               tar -czf 'app_${TS}.tar.gz' 'app_${TS}' && rm -rf 'app_${TS}'
             fi
             ls -1t app_*.tar.gz 2>/dev/null | tail -n +\$(( ${{ inputs.keep_backups }} + 1 )) | xargs -r rm -f
           "
+
+          if [ -n "$POST_DEPLOYMENT_COMMANDS" ]; then
+            echo "Running post-deployment commands..."
+            ssh "$ALIAS" "cd '$DEPLOY_PATH' && $POST_DEPLOYMENT_COMMANDS"
+          fi
 
       - name: Cleanup runner
         if: always()

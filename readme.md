@@ -2,34 +2,32 @@
 
 Reusable GitHub Actions workflow for deploying [Roots
 Bedrock](https://roots.io/bedrock/) projects to shared hosting with SSH
-access (e.g. Hostido), using a single live directory swapped atomically
-via `mv` - no release-numbering, no extra tooling, just rsync + ssh.
+access (e.g. Hostido). Mirrors the atomic-swap pattern used internally
+at ParadiseMediaOrg (`job-deployment-wordpress.yml`), adapted for
+Bedrock's `.env`-based config.
 
 ## Server layout
 
 ```
-deployments/
-  app/               <- live directory; public_html is a symlink to app/web
+<deployment_dir_path parent>/
+  app/               <- live release, swapped atomically via mv
   shared/
     .env
-    uploads/          -> web/app/uploads
+    uploads/
   backups/
     app/
       app_<timestamp>.tar.gz
     db/
-      pre-deploy-<timestamp>.sql.gz
+      db_<timestamp>.sql.gz
+
+<public_dir_path>/    <- e.g. public_html - a PERMANENT real directory,
+                          never replaced. Refreshed after every deploy
+                          with one symlink per top-level entry in
+                          app/web/. Anything not part of the build
+                          (e.g. a WordPress-generated .htaccess) is
+                          left untouched instead of being wiped, unlike
+                          a whole-directory symlink.
 ```
-
-Set up once, manually, outside this workflow:
-
-```bash
-ln -s deployments/app/web public_html
-```
-
-Each deploy builds a fresh release next to `app/`, links in `shared/`,
-then does two atomic renames (old `app/` -> `backups/app_<ts>`, new
-release -> `app/`). The old version is compressed and old backups
-beyond `keep_backups` are pruned.
 
 ## Assumptions
 
@@ -37,12 +35,13 @@ beyond `keep_backups` are pruned.
   on the server. The caller project's `Makefile` must expose a
   `cicd-build` target that produces a ready-to-ship artifact.
 - PHP/Node versions are read from the caller repo's
-  `.ddev/config.yaml` (`php_version`, `nodejs_version`) - not passed as
-  workflow inputs, so CI can never drift from the local dev container.
+  `.ddev/config.yaml` (`php_version`, `nodejs_version`).
 - PHP-FPM on the server runs as the same user as SSH - no separate
   web-server-user permission handling is needed.
 
 ## Usage
+
+Thin caller workflow in the consuming project:
 
 ```yaml
 # .github/workflows/deploy-staging.yml
@@ -56,11 +55,22 @@ jobs:
     with:
       stage: staging
       bedrock_root: wp
-      deploy_path: /home/user/domains/staging.example.com/deployments
     secrets:
       SSH_CONFIG: ${{ secrets.SSH_CONFIG }}
       SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
 ```
+
+## Required GitHub Environment `vars` (per environment, e.g. "staging")
+
+| Variable | Example | Meaning |
+|---|---|---|
+| `BEDROCK_DEPLOYMENT_SERVER_DEPLOYMENT_DIR_PATH` | `/home/user/domains/x.com/deployments/app` | live release path |
+| `BEDROCK_DEPLOYMENT_SERVER_PUBLIC_DIR_PATH` | `/home/user/domains/x.com/public_html` | permanent webroot |
+| `BEDROCK_DEPLOYMENT_SERVER_UPLOADS_DIR_PATH` | `/home/user/domains/x.com/deployments/shared/uploads` | persistent uploads |
+| `BEDROCK_DEPLOYMENT_SERVER_ENV_PATH` | `/home/user/domains/x.com/deployments/shared/.env` | persistent `.env` |
+| `BEDROCK_DEPLOYMENT_LOCAL_PUBLIC_DIR_PATH` | `web` | webroot path inside the built artifact |
+| `BEDROCK_DEPLOYMENT_LOCAL_UPLOADS_DIR_PATH` | `web/app/uploads` | uploads path inside the built artifact |
+| `BEDROCK_DEPLOYMENT_SERVER_POST_DEPLOYMENT_COMMANDS` | `wp cache flush --path=web/wp` | optional, run on the server after deploy |
 
 ## Required secrets (per GitHub Environment)
 
@@ -73,3 +83,9 @@ jobs:
     User deployuser
     Port 22
   ```
+
+## One-time server setup
+
+`SERVER_PUBLIC_DIR_PATH` must exist as a real directory before the
+first deploy (not a symlink) - e.g. `mkdir -p public_html`. Everything
+inside it is managed by the workflow from then on.

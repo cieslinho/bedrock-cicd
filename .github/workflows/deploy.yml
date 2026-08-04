@@ -4,17 +4,26 @@ on:
   workflow_call:
     inputs:
       stage:
-        description: 'Deployer stage/host defined in deploy.php (e.g. "staging", "live")'
+        description: 'Environment name (e.g. "staging", "live") - used for the GitHub Environment'
         required: true
         type: string
       bedrock_root:
-        description: 'Path to the Bedrock root in the repo (contains composer.json, deploy.php)'
+        description: 'Path to the Bedrock root in the repo (contains composer.json)'
         required: false
         type: string
         default: 'wp'
+      deploy_path:
+        description: 'Absolute server path to the deployments/ root, e.g. /home/user/domains/example.com/deployments'
+        required: true
+        type: string
+      keep_backups:
+        description: 'Number of compressed previous releases to keep in deployments/backups'
+        required: false
+        type: number
+        default: 3
     secrets:
       SSH_CONFIG:
-        description: 'SSH config block (Host, HostName, User, Port, IdentityFile)'
+        description: 'SSH config block (Host, HostName, User, Port) - any Host alias'
         required: true
       SSH_PRIVATE_KEY:
         required: true
@@ -63,9 +72,6 @@ jobs:
           cache: npm
           cache-dependency-path: ${{ inputs.bedrock_root }}/**/package-lock.json
 
-      # shivammathur/setup-php has no built-in cache, unlike setup-node -
-      # cache Composer's own download cache (not vendor/) so a hit still
-      # re-resolves and re-links, just skips re-downloading packages.
       - name: Cache Composer downloads
         uses: actions/cache@v6
         with:
@@ -78,25 +84,8 @@ jobs:
       - name: Composer install and asset build
         run: make cicd-build
 
-      # Deployer is a CI tool, not a project dependency - it must not
-      # live in the Bedrock composer.json, since `composer install
-      # --no-dev` above strips require-dev and would remove it from the
-      # build. deployer.org/deployer.phar serves a stale v6 build -
-      # GitHub Releases has the current one.
-      - name: Install Deployer
-        run: |
-          curl -sL https://github.com/deployphp/deployer/releases/latest/download/deployer.phar -o deployer.phar
-          chmod +x deployer.phar
-
-      # Checked out separately from the Bedrock build for the same
-      # reason - the recipe is not a composer dependency of the project.
-      - name: Checkout bedrock-cicd recipe
-        uses: actions/checkout@v7
-        with:
-          repository: cieslinho/bedrock-cicd
-          path: .bedrock-cicd
-
       - name: Setup SSH
+        id: ssh
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
@@ -104,16 +93,66 @@ jobs:
           echo "${{ secrets.SSH_CONFIG }}" >> ~/.ssh/config
           echo "  IdentityFile ~/.ssh/deploy_key" >> ~/.ssh/config
           chmod 600 ~/.ssh/config
+          ALIAS=$(awk '/^Host /{print $2; exit}' ~/.ssh/config)
           HOSTNAME=$(awk '/HostName/{print $2}' ~/.ssh/config | head -1)
           PORT=$(awk '/Port/{print $2}' ~/.ssh/config | head -1)
           ssh-keyscan -p ${PORT:-22} "$HOSTNAME" >> ~/.ssh/known_hosts
+          echo "alias=$ALIAS" >> "$GITHUB_OUTPUT"
 
-      - name: Deployer release
+      # Single live directory (deployments/app), swapped via atomic mv
+      # instead of Deployer's releases/N + current-symlink model - the
+      # server's public_html is a symlink to deployments/app/web, set up
+      # once outside this workflow, so it never needs touching here.
+      #
+      # deployments/
+      #   app/               <- live, public_html points here
+      #   shared/            <- .env, uploads - survive every deploy
+      #   backups/           <- compressed previous releases (tar.gz)
+      - name: Deploy
         working-directory: ${{ inputs.bedrock_root }}
         env:
-          CI_BUILD_PATH: ${{ github.workspace }}/${{ inputs.bedrock_root }}
-          BEDROCK_CICD_RECIPE: ${{ github.workspace }}/.bedrock-cicd/recipe/bedrock.php
-        run: php ${{ github.workspace }}/deployer.phar deploy ${{ inputs.stage }} -f deploy.php --no-interaction -vv
+          ALIAS: ${{ steps.ssh.outputs.alias }}
+        run: |
+          set -euo pipefail
+          DEPLOY_PATH="${{ inputs.deploy_path }}"
+          TS="$(ssh "$ALIAS" 'date +%Y-%m-%d-%H%M%S')"
+          RELEASE="deploying_${TS}"
+
+          echo "Preparing release directory..."
+          ssh "$ALIAS" "mkdir -p '$DEPLOY_PATH/$RELEASE' '$DEPLOY_PATH/shared/uploads' '$DEPLOY_PATH/backups'"
+          ssh "$ALIAS" "[ -f '$DEPLOY_PATH/shared/.env' ] || touch '$DEPLOY_PATH/shared/.env'"
+
+          echo "Uploading build..."
+          rsync -az \
+            --exclude='.env' \
+            --exclude='web/app/uploads' \
+            -e "ssh -o StrictHostKeyChecking=no" \
+            ./ "$ALIAS:$DEPLOY_PATH/$RELEASE/"
+
+          echo "Linking shared files..."
+          ssh "$ALIAS" "
+            ln -nfs '$DEPLOY_PATH/shared/.env' '$DEPLOY_PATH/$RELEASE/.env'
+            rm -rf '$DEPLOY_PATH/$RELEASE/web/app/uploads'
+            ln -nfs '$DEPLOY_PATH/shared/uploads' '$DEPLOY_PATH/$RELEASE/web/app/uploads'
+          "
+
+          echo "Swapping into place..."
+          ssh "$ALIAS" "
+            set -e
+            if [ -d '$DEPLOY_PATH/app' ]; then
+              mv '$DEPLOY_PATH/app' '$DEPLOY_PATH/backups/app_${TS}'
+            fi
+            mv '$DEPLOY_PATH/$RELEASE' '$DEPLOY_PATH/app'
+          "
+
+          echo "Compressing backup and rotating old ones..."
+          ssh "$ALIAS" "
+            cd '$DEPLOY_PATH/backups'
+            if [ -d 'app_${TS}' ]; then
+              tar -czf 'app_${TS}.tar.gz' 'app_${TS}' && rm -rf 'app_${TS}'
+            fi
+            ls -1t app_*.tar.gz 2>/dev/null | tail -n +\$(( ${{ inputs.keep_backups }} + 1 )) | xargs -r rm -f
+          "
 
       - name: Cleanup runner
         if: always()

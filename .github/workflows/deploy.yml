@@ -26,7 +26,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # .ddev/config.yaml is the single source of truth for PHP/Node
       # versions - read from it instead of duplicating the values here,
@@ -44,9 +44,21 @@ jobs:
           tools: composer
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ steps.versions.outputs.node }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.bedrock_root }}/**/package-lock.json
+
+      # shivammathur/setup-php has no built-in cache, unlike setup-node -
+      # cache Composer's own download cache (not vendor/) so a hit still
+      # re-resolves and re-links, just skips re-downloading packages.
+      - name: Cache Composer downloads
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/composer
+          key: composer-${{ runner.os }}-${{ hashFiles(format('{0}/**/composer.lock', inputs.bedrock_root)) }}
+          restore-keys: composer-${{ runner.os }}-
 
       # Requires a `cicd-build` target in the caller repo's Makefile
       # (composer install + asset build for every buildable directory).
@@ -54,7 +66,7 @@ jobs:
         run: make cicd-build
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bedrock-build
           path: ${{ inputs.bedrock_root }}
@@ -68,7 +80,7 @@ jobs:
 
     steps:
       - name: Download artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: bedrock-build
           path: ${{ inputs.bedrock_root }}
@@ -76,16 +88,17 @@ jobs:
       # Deployer is a CI tool, not a project dependency - it must not
       # live in the Bedrock composer.json, since `composer install
       # --no-dev` (the build step above) strips require-dev and would
-      # remove it from the artifact.
+      # remove it from the artifact. deployer.org/deployer.phar serves a
+      # stale v6 build - GitHub Releases has the current one.
       - name: Install Deployer
         run: |
-          curl -LO https://deployer.org/deployer.phar
+          curl -sL https://github.com/deployphp/deployer/releases/latest/download/deployer.phar -o deployer.phar
           chmod +x deployer.phar
 
       # Checked out separately from the Bedrock artifact for the same
       # reason - the recipe is not a composer dependency of the project.
       - name: Checkout bedrock-cicd recipe
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: cieslinho/bedrock-cicd
           path: .bedrock-cicd

@@ -89,3 +89,12 @@ jobs:
 `SERVER_PUBLIC_DIR_PATH` must exist as a real directory before the
 first deploy (not a symlink) - e.g. `mkdir -p public_html`. Everything
 inside it is managed by the workflow from then on.
+
+If you need `.htaccess` (or any other file WordPress or the server
+writes directly, not produced by the build) to survive every deploy,
+create it as a **real file directly in `SERVER_PUBLIC_DIR_PATH`**, not
+as a symlink into `app/web/`. The refresh step only adds/replaces
+symlinks for entries that exist in the new release - it never deletes
+a pre-existing real file with no matching build entry, so a real file
+here persists automatically. A symlink pointing into `app/web/` will
+dangle the moment that release gets swapped away.

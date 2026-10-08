@@ -25,6 +25,8 @@ on:
         value: ${{ jobs.get-env-vars.outputs.local_uploads_dir_path }}
       server_post_deployment_commands:
         value: ${{ jobs.get-env-vars.outputs.server_post_deployment_commands }}
+      server_wp_cli:
+        value: ${{ jobs.get-env-vars.outputs.server_wp_cli }}
 
 jobs:
   get-env-vars:
@@ -41,6 +43,7 @@ jobs:
       local_public_dir_path: ${{ steps.vars.outputs.local_public_dir_path }}
       local_uploads_dir_path: ${{ steps.vars.outputs.local_uploads_dir_path }}
       server_post_deployment_commands: ${{ steps.vars.outputs.server_post_deployment_commands }}
+      server_wp_cli: ${{ steps.vars.outputs.server_wp_cli }}
 
     steps:
       - name: Checkout
@@ -67,3 +70,7 @@ jobs:
           echo "server_post_deployment_commands<<COMMANDS_EOF" >> "$GITHUB_OUTPUT"
           echo "${{ vars.BEDROCK_DEPLOYMENT_SERVER_POST_DEPLOYMENT_COMMANDS }}" >> "$GITHUB_OUTPUT"
           echo "COMMANDS_EOF" >> "$GITHUB_OUTPUT"
+          # The command that runs WP-CLI on the server (DB backup before the swap). Plain `wp` unless the host's default
+          # CLI PHP is older than the project needs — e.g. "/opt/alt/php84/usr/bin/php /usr/local/bin/wp".
+          WP_CLI='${{ vars.BEDROCK_DEPLOYMENT_SERVER_WP_CLI }}'
+          echo "server_wp_cli=${WP_CLI:-wp}" >> "$GITHUB_OUTPUT"

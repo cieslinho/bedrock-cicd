@@ -139,7 +139,7 @@ jobs:
 
           echo "Uploading build..."
           rsync -az \
-            --exclude=".$(basename "$ENV_PATH")" \
+            --exclude="/$(basename "$ENV_PATH")" \
             --exclude="$LOCAL_UPLOADS" \
             -e "ssh -o StrictHostKeyChecking=no" \
             ./ "$ALIAS:$RELEASE_DIR/"

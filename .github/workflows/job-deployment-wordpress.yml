@@ -42,6 +42,10 @@ on:
         required: false
         type: string
         default: ''
+      server_wp_cli:
+        required: false
+        type: string
+        default: 'wp'
     secrets:
       SSH_CONFIG:
         required: true
@@ -123,6 +127,7 @@ jobs:
           LOCAL_PUBLIC: ${{ inputs.local_public_dir_path }}
           LOCAL_UPLOADS: ${{ inputs.local_uploads_dir_path }}
           POST_DEPLOYMENT_COMMANDS: ${{ inputs.server_post_deployment_commands }}
+          WP_CLI: ${{ inputs.server_wp_cli }}
         run: |
           set -euo pipefail
           TS="$(ssh "$ALIAS" 'date +%Y-%m-%d-%H%M%S')"
@@ -151,7 +156,7 @@ jobs:
           echo "Backing up database before swap..."
           ssh "$ALIAS" "
             if [ -d '$DEPLOY_PATH/$LOCAL_PUBLIC/wp' ]; then
-              cd '$DEPLOY_PATH' && wp db export - --path='$LOCAL_PUBLIC/wp' | gzip > '$(dirname "$DEPLOY_PATH")/backups/db/db_${TS}.sql.gz'
+              cd '$DEPLOY_PATH' && $WP_CLI db export - --path='$LOCAL_PUBLIC/wp' | gzip > '$(dirname "$DEPLOY_PATH")/backups/db/db_${TS}.sql.gz'
             fi
             cd '$(dirname "$DEPLOY_PATH")/backups/db' && ls -1t db_*.sql.gz 2>/dev/null | tail -n +\$(( ${{ inputs.keep_backups }} + 1 )) | xargs -r rm -f
           " || echo "::warning::Database backup failed or skipped, continuing with deploy"
@@ -186,7 +191,7 @@ jobs:
 
           if [ -n "$POST_DEPLOYMENT_COMMANDS" ]; then
             echo "Running post-deployment commands..."
-            ssh "$ALIAS" "cd '$DEPLOY_PATH' && $POST_DEPLOYMENT_COMMANDS"
+            ssh "$ALIAS" "cd '$DEPLOY_PATH' && WP_CLI='$WP_CLI' && $POST_DEPLOYMENT_COMMANDS"
           fi
 
       - name: Cleanup runner

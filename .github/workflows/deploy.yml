@@ -46,6 +46,7 @@ jobs:
       local_public_dir_path: ${{ needs.get-env-vars.outputs.local_public_dir_path }}
       local_uploads_dir_path: ${{ needs.get-env-vars.outputs.local_uploads_dir_path }}
       server_post_deployment_commands: ${{ needs.get-env-vars.outputs.server_post_deployment_commands }}
+      server_wp_cli: ${{ needs.get-env-vars.outputs.server_wp_cli }}
     secrets:
       SSH_CONFIG: ${{ secrets.SSH_CONFIG }}
       SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}

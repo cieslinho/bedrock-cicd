@@ -71,6 +71,7 @@ jobs:
 | `BEDROCK_DEPLOYMENT_LOCAL_PUBLIC_DIR_PATH` | `web` | webroot path inside the built artifact |
 | `BEDROCK_DEPLOYMENT_LOCAL_UPLOADS_DIR_PATH` | `web/app/uploads` | uploads path inside the built artifact |
 | `BEDROCK_DEPLOYMENT_SERVER_POST_DEPLOYMENT_COMMANDS` | `wp cache flush --path=web/wp` | optional, run on the server after deploy |
+| `BEDROCK_DEPLOYMENT_SERVER_WP_CLI` | `/opt/alt/php84/usr/bin/php /usr/local/bin/wp` | optional, default `wp` — the WP-CLI command on the server (DB backup before the swap); set it when the host's default CLI PHP is older than the project needs. Post-deployment commands get it as `$WP_CLI` |
 
 ## Required secrets (per GitHub Environment)
 
